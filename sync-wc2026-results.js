@@ -1,43 +1,42 @@
 #!/usr/bin/env node
-// WC2026 Result Auto-Sync — reads credentials from environment variables only.
-// Set SUPABASE_URL, SUPABASE_KEY, and API_FOOTBALL_KEY as GitHub Actions secrets.
-const SUPABASE_URL     = process.env.SUPABASE_URL;
-const SUPABASE_KEY     = process.env.SUPABASE_KEY;
-const API_FOOTBALL_KEY = process.env.API_FOOTBALL_KEY;
+// WC2026 Result Auto-Sync — uses football-data.org (free tier)
+// Reads credentials ONLY from environment variables.
+
+const SUPABASE_URL      = process.env.SUPABASE_URL;
+const SUPABASE_KEY      = process.env.SUPABASE_KEY;
+const FOOTBALL_DATA_KEY = process.env.FOOTBALL_DATA_KEY;
 const TABLE_NAME = 'results';
 
-if (!SUPABASE_URL || !SUPABASE_KEY || !API_FOOTBALL_KEY) {
-  console.error('Missing env vars: SUPABASE_URL, SUPABASE_KEY and API_FOOTBALL_KEY must all be set.');
+if (!SUPABASE_URL || !SUPABASE_KEY || !FOOTBALL_DATA_KEY) {
+  console.error('Missing env vars: SUPABASE_URL, SUPABASE_KEY and FOOTBALL_DATA_KEY must all be set.');
   process.exit(1);
 }
 
-async function fetchFinishedFixtures() {
-  const statuses = ['FT', 'AET', 'PEN'];
-  const all = [];
-  for (const status of statuses) {
-    const url = 'https://v3.football.api-sports.io/fixtures?league=1&season=2026&status=' + status;
-    const res = await fetch(url, { headers: { 'x-apisports-key': API_FOOTBALL_KEY } });
-    if (!res.ok) { const body = await res.text(); throw new Error('API-Football HTTP ' + res.status + ': ' + body); }
-    const data = await res.json();
-    if (data.errors && Object.keys(data.errors).length > 0) throw new Error('API-Football error: ' + JSON.stringify(data.errors));
-    all.push(...(data.response || []));
-    console.log('  status=' + status + ': ' + (data.response || []).length + ' fixture(s).');
+async function fetchFinishedMatches() {
+  const url = 'https://api.football-data.org/v4/competitions/WC/matches?status=FINISHED';
+  const res = await fetch(url, { headers: { 'X-Auth-Token': FOOTBALL_DATA_KEY } });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error('football-data.org HTTP ' + res.status + ': ' + body);
   }
-  return all;
+  const data = await res.json();
+  if (data.errorCode) throw new Error('football-data.org error: ' + data.message);
+  return data.matches || [];
 }
 
-function toRow(f) {
+function toRow(m) {
+  const winner = m.score?.winner; // 'HOME_TEAM', 'AWAY_TEAM', 'DRAW', null
   return {
-    fixture_id:  f.fixture.id,
-    home_team:   f.teams.home.name,
-    away_team:   f.teams.away.name,
-    home_score:  f.goals.home,
-    away_score:  f.goals.away,
-    status:      f.fixture.status.short,
-    match_date:  f.fixture.date,
-    round:       f.league.round,
-    home_winner: f.teams.home.winner,
-    away_winner: f.teams.away.winner,
+    fixture_id:  m.id,
+    home_team:   m.homeTeam.name,
+    away_team:   m.awayTeam.name,
+    home_score:  m.score?.fullTime?.home ?? null,
+    away_score:  m.score?.fullTime?.away ?? null,
+    status:      m.status,
+    match_date:  m.utcDate,
+    round:       m.stage + (m.group ? ' – ' + m.group : ''),
+    home_winner: winner === 'HOME_TEAM',
+    away_winner: winner === 'AWAY_TEAM',
     updated_at:  new Date().toISOString(),
   };
 }
@@ -54,23 +53,40 @@ async function upsertRows(rows) {
     },
     body: JSON.stringify(rows),
   });
-  if (!res.ok) { const body = await res.text(); throw new Error('Supabase upsert HTTP ' + res.status + ': ' + body); }
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error('Supabase upsert HTTP ' + res.status + ': ' + body);
+  }
   return rows.length;
 }
 
 async function main() {
-  console.log('[' + new Date().toISOString() + '] WC2026 sync starting');
-  let fixtures;
-  try { fixtures = await fetchFinishedFixtures(); }
-  catch (err) { console.error('Failed to fetch:', err.message); process.exit(1); }
-  console.log('Total finished fixtures: ' + fixtures.length);
-  if (fixtures.length === 0) { console.log('Nothing to sync.'); return; }
-  fixtures.forEach(f => console.log(
-    '  ' + f.teams.home.name + ' ' + f.goals.home + '-' + f.goals.away + ' ' + f.teams.away.name + ' [' + f.league.round + ']'
+  console.log('[' + new Date().toISOString() + '] WC2026 sync starting (football-data.org)');
+  let matches;
+  try {
+    matches = await fetchFinishedMatches();
+  } catch (err) {
+    console.error('Failed to fetch matches:', err.message);
+    process.exit(1);
+  }
+  console.log('Finished matches found: ' + matches.length);
+  if (matches.length === 0) {
+    console.log('Nothing to sync.');
+    return;
+  }
+  matches.forEach(m => console.log(
+    '  ' + m.homeTeam.name + ' ' +
+    (m.score?.fullTime?.home ?? '?') + '-' + (m.score?.fullTime?.away ?? '?') +
+    ' ' + m.awayTeam.name + ' [' + m.stage + ']'
   ));
-  const rows = fixtures.map(toRow);
-  try { const count = await upsertRows(rows); console.log('Upserted ' + count + ' rows to ' + TABLE_NAME); }
-  catch (err) { console.error('Supabase upsert failed:', err.message); process.exit(1); }
+  const rows = matches.map(toRow);
+  try {
+    const count = await upsertRows(rows);
+    console.log('Upserted ' + count + ' rows to ' + TABLE_NAME);
+  } catch (err) {
+    console.error('Supabase upsert failed:', err.message);
+    process.exit(1);
+  }
   console.log('[done]');
 }
 
