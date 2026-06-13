@@ -39,12 +39,21 @@ function mapRound(stage) {
     return map[stage] || stage.toLowerCase();
 }
 
+// Normalize football-data.org team names to match the frontend's PLAYERS list
+function normalizeTeamName(name) {
+    const map = {
+          'Bosnia-Herzegovina':   'Bosnia and Herzegovina',
+          'Bosnia & Herzegovina': 'Bosnia and Herzegovina',
+    };
+    return map[name] || name;
+}
+
 function toRow(m) {
     const winner = m.score?.winner; // 'HOME_TEAM', 'AWAY_TEAM', 'DRAW', null
   return {
         id:          m.id,                           // football-data.org fixture ID -> primary key
-        team1:       m.homeTeam.name,
-        team2:       m.awayTeam.name,
+        team1:       normalizeTeamName(m.homeTeam.name),
+        team2:       normalizeTeamName(m.awayTeam.name),
         score1:      m.score?.fullTime?.home ?? null,
         score2:      m.score?.fullTime?.away ?? null,
         status:      m.status,
